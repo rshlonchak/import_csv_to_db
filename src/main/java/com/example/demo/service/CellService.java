@@ -4,10 +4,11 @@ import com.example.demo.dto.OpenCellIdDto;
 import com.example.demo.model.OpenCellId;
 import com.example.demo.repository.CellRepository;
 import com.opencsv.CSVReader;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
 
-import java.io.FileReader;
+import java.io.InputStreamReader;
 import java.util.*;
 
 @Service
@@ -15,7 +16,7 @@ public class CellService {
 
     private final CellRepository repository;
 
-    private static final int BATCH_SIZE = 1000;
+    private static final int BATCH_SIZE = 5000;
 
     public CellService(CellRepository repository) {
         this.repository = repository;
@@ -23,7 +24,6 @@ public class CellService {
 
     private OpenCellIdDto parse(String[] row) {
         OpenCellIdDto dto = new OpenCellIdDto();
-
         dto.setRadio(row[0]);
         dto.setMcc(Integer.parseInt(row[1]));
         dto.setMnc(Integer.parseInt(row[2]));
@@ -38,69 +38,80 @@ public class CellService {
         dto.setCreated(Long.parseLong(row[11]));
         dto.setUpdated(Long.parseLong(row[12]));
         dto.setAverageSignal(Integer.parseInt(row[13]));
-
         return dto;
     }
 
-    @Transactional
-    public void importFile(String path) throws Exception {
-        CSVReader reader = new CSVReader(new FileReader(path));
+    private OpenCellId toEntity(OpenCellIdDto dto) {
+        OpenCellId entity = new OpenCellId();
+        entity.setRadio(dto.getRadio());
+        entity.setMcc(dto.getMcc());
+        entity.setMnc(dto.getMnc());
+        entity.setLac(dto.getLac());
+        entity.setCid(dto.getCid());
+        entity.setUnit(dto.getUnit());
+        entity.setLon(dto.getLon());
+        entity.setLat(dto.getLat());
+        entity.setRange(dto.getRange());
+        entity.setSamples(dto.getSamples());
+        entity.setChangeable(dto.getChangeable());
+        entity.setCreated((int) dto.getCreated());
+        entity.setUpdated((int) dto.getUpdated());
+        entity.setAverageSignal(dto.getAverageSignal());
+        return entity;
+    }
 
-        List<OpenCellId> batch = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
+    private List<OpenCellId> filterExisting(List<OpenCellId> batch) {
+        return batch.stream().filter(cell -> repository.findByMccAndMncAndLacAndCid(cell.getMcc(), cell.getMnc(), cell.getLac(), cell.getCid()).isEmpty()).toList();
+    }
 
-        String[] line;
+    public void importFile(MultipartFile file) throws Exception {
 
-        reader.readNext();
+        try (CSVReader reader = new CSVReader(
+                new InputStreamReader(file.getInputStream())
+        )) {
 
-        while ((line = reader.readNext()) != null) {
-            try {
-                if (line.length < 14) {
-                    continue;
-                }
+            List<OpenCellId> batch = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            reader.readNext();
+            String[] line;
+            while ((line = reader.readNext()) != null) {
+                if (line.length < 14) continue;
 
                 OpenCellIdDto dto = parse(line);
-
                 String key = dto.getMcc() + "-"
                         + dto.getMnc() + "-"
                         + dto.getLac() + "-"
                         + dto.getCid();
 
-                if (!seen.add(key)) {
-                    continue;
-                }
+                if (!seen.add(key)) {continue;}
 
-                OpenCellId entity = new OpenCellId();
-
-                entity.setRadio(dto.getRadio());
-                entity.setMcc(dto.getMcc());
-                entity.setMnc(dto.getMnc());
-                entity.setLac(dto.getLac());
-                entity.setCid(dto.getCid());
-                entity.setUnit(dto.getUnit());
-                entity.setLon(dto.getLon());
-                entity.setLat(dto.getLat());
-                entity.setRange(dto.getRange());
-                entity.setSamples(dto.getSamples());
-                entity.setChangeable(dto.getChangeable());
-                entity.setCreated((int) dto.getCreated());
-                entity.setUpdated((int) dto.getUpdated());
-                entity.setAverageSignal(dto.getAverageSignal());
-
-                batch.add(entity);
+                batch.add(toEntity(dto));
 
                 if (batch.size() >= BATCH_SIZE) {
-                    repository.saveAll(batch);
+                    List<OpenCellId> filtered = filterExisting(batch);
+                    saveBatchWithFallback(filtered);
                     batch.clear();
                 }
-
-            } catch (Exception e) {
-                e.printStackTrace();
+            }
+            if (!batch.isEmpty()) {
+                List<OpenCellId> filtered = filterExisting(batch);
+                saveBatchWithFallback(filtered);
             }
         }
+    }
 
-        if (!batch.isEmpty()) {
+    public void saveBatchWithFallback(List<OpenCellId> batch) {
+        try {
             repository.saveAll(batch);
+            System.out.println("SAVED batch: " + batch.size());
+        } catch (DataIntegrityViolationException ignored) {
+            System.out.println("Check batch");
+            for (OpenCellId entity : batch) {
+                try {
+                    repository.save(entity);
+                } catch (Exception ignored1) {
+                }
+            }
         }
     }
 }
